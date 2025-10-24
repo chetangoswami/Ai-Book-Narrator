@@ -64,11 +64,13 @@ Follow these instructions to get a copy of the project up and running on your lo
     -   Enable **Firestore Database**:
         -   Go to the **Firestore Database** section.
         -   Create a database in **Production mode**.
-        -   Go to the **Rules** tab and update the rules to allow authenticated users to read and write their own data. A basic rule set to start with could be:
+        -   Go to the **Rules** tab and update the rules to use a more robust, user-centric structure. This allows authenticated users to read and write any documents within their own user-specific collection, preventing permission errors. Use the following rules:
             ```
             rules_version = '2';
             service cloud.firestore {
               match /databases/{database}/documents {
+                // Allow users to read/write any documents (like their bookmarks)
+                // stored under a top-level `users` collection, keyed by their user ID.
                 match /users/{userId}/{document=**} {
                   allow read, write: if request.auth.uid == userId;
                 }
@@ -95,7 +97,7 @@ Follow these instructions to get a copy of the project up and running on your lo
     -   The service returns raw audio data encoded in base64.
 7.  **Custom Audio Service:** A custom service in `src/services/audioService.ts` manages a queue of these audio chunks. It decodes the audio and uses the Web Audio API for seamless, gapless playback.
 8.  **Real-time Highlighting:** The audio service estimates the duration of each sentence and uses timeouts to update the UI, highlighting the sentence currently being spoken.
-9.  **Bookmark Persistence:** When a user logs in and creates a bookmark, the current playback state (chapter, audio chunk index, and time offset) is saved to their user-specific document in Firestore.
+9.  **Bookmark Persistence:** When a user logs in and creates a bookmark, the current playback state is saved to their user-specific document in the `users/{userId}/bookmarks/{pdfKey}` path in Firestore.
 
 ---
 

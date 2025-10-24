@@ -35,12 +35,15 @@ type AudioQueueItem = {
 };
 
 let audioContext: AudioContext | null = null;
-let audioQueue: AudioQueueItem[] = [];
+let audioQueue = new Map<number, AudioQueueItem>();
 let isSessionActive = false;
 let isPlayingChunk = false;
 let isDecoding = false;
 let isPaused = false;
 let isFirstChunkOfSession = true;
+let isEndOfStream = false;
+let nextChunkToPlayIndex = 0;
+
 
 let currentSource: AudioBufferSourceNode | null = null;
 let currentBuffer: AudioBuffer | null = null;
@@ -83,12 +86,14 @@ const _resetState = () => {
         currentSource.disconnect();
     }
     
-    audioQueue = [];
+    audioQueue.clear();
     isSessionActive = false;
     isPlayingChunk = false;
     isDecoding = false;
     isPaused = false;
     isFirstChunkOfSession = true;
+    isEndOfStream = false;
+    nextChunkToPlayIndex = 0;
     currentSource = null;
     currentBuffer = null;
     currentTextChunk = null;
@@ -189,14 +194,21 @@ const _playChunk = (item: Required<AudioQueueItem>) => {
 
 const _tryToPlayNextChunk = async () => {
     if (!isSessionActive || isPlayingChunk || isDecoding) return;
-    if (audioQueue.length === 0) {
+
+    // Condition for ending the session: the stream has been signaled as ended, and the queue is empty.
+    if (isEndOfStream && audioQueue.size === 0) {
         onSessionEndedCallback?.();
         _resetState();
         return;
     }
 
+    // Check if the *next sequential* chunk is available in the queue.
+    if (!audioQueue.has(nextChunkToPlayIndex)) {
+        return; // Not ready, wait for the correct chunk to be added.
+    }
+
     isDecoding = true;
-    const nextItem = audioQueue[0];
+    const nextItem = audioQueue.get(nextChunkToPlayIndex)!;
 
     try {
         if (!nextItem.buffer) {
@@ -217,7 +229,11 @@ const _tryToPlayNextChunk = async () => {
         const wasFirstChunk = !currentBuffer;
         
         isPlayingChunk = true;
-        const itemToPlay = audioQueue.shift() as Required<AudioQueueItem>;
+        const itemToPlay = nextItem as Required<AudioQueueItem>;
+
+        // Remove the chunk from the queue and advance the index for the next one.
+        audioQueue.delete(nextChunkToPlayIndex);
+        nextChunkToPlayIndex++;
         
         if (wasFirstChunk) {
             onFirstChunkReadyCallback?.();
@@ -227,11 +243,11 @@ const _tryToPlayNextChunk = async () => {
     }
 };
 
-export const startStreamingPlayback = (onFirstChunk: () => void, onEnded: () => void, onSentenceChange: (index: number) => void, initialOffset = 0, initialSentences = 0) => {
+export const startStreamingPlayback = (onFirstChunk: () => void, onEnded: () => void, onSentenceChange: (index: number) => void, initialOffset = 0) => {
     stopAudio();
     isSessionActive = true;
-    startOffset = initialOffset; // For the very first chunk
-    totalSentencesProcessed = initialSentences;
+    startOffset = initialOffset;
+    totalSentencesProcessed = 0;
     onFirstChunkReadyCallback = onFirstChunk;
     onSessionEndedCallback = onEnded;
     onSentenceChangeCallback = onSentenceChange;
@@ -241,8 +257,14 @@ export const startStreamingPlayback = (onFirstChunk: () => void, onEnded: () => 
 
 export const addAudioChunkToQueue = (base64Audio: string, textChunk: string, chunkIndex: number) => {
     if (!isSessionActive) return;
-    audioQueue.push({ base64: base64Audio, text: textChunk, chunkIndex });
+    audioQueue.set(chunkIndex, { base64: base64Audio, text: textChunk, chunkIndex });
     _tryToPlayNextChunk();
+};
+
+export const signalEndOfStream = () => {
+    if (!isSessionActive) return;
+    isEndOfStream = true;
+    _tryToPlayNextChunk(); // Check if we can/should end the session now.
 };
 
 export const pauseAudio = () => {
@@ -271,6 +293,10 @@ export const resumeAudio = () => {
     };
     
     isPaused = false;
+    
+    const ctx = getAudioContext();
+    nextPlaybackTime = ctx.currentTime;
+
     _playChunk(item);
 };
 
