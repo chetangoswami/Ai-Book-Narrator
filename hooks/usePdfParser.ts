@@ -16,12 +16,19 @@ export const useTocGenerator = (file: File | null) => {
       return;
     }
 
-    // This effect should only run for new files, not cached ones
-    // The check for cached TOC happens in the App component.
+    // If the file has a size of 0, it's a placeholder for a book loaded from the library.
+    // The App component is responsible for setting the ToC directly, so we should not process it here.
+    if (file.size === 0) {
+      setLoading(false);
+      setError(null);
+      setLoadingMessage('');
+      return;
+    }
+
     const processPdf = async () => {
       setLoading(true);
       setError(null);
-      setToc([]);
+      setToc([]); // Reset ToC for new file processing
 
       try {
         // Step 1: Classify the PDF
