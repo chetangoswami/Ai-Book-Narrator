@@ -6,7 +6,10 @@ export interface Bookmark {
   displayText: string; // A snippet of the text for UI display
 }
 
-export interface CachedBook {
-  key: string;
-  name: string;
+export interface Book {
+  pdfKey: string;
+  fileName: string;
+  pdfDownloadUrl: string;
+  toc: string[];
+  createdAt: any; // Can be a server timestamp
 }

@@ -6,9 +6,9 @@ import { UploadIcon, BookOpenIcon, PlayIcon, StopIcon, SpeakerWaveIcon, PauseIco
 import { Spinner, ThinkingIndicator } from './components/Spinner';
 import { AVAILABLE_VOICES, VOICE_PREVIEW_TEXT, NARRATION_STYLES } from './constants';
 import { playSimpleAudio } from './services/audioService';
-import { Bookmark, CachedBook } from './types';
+import { Bookmark, Book } from './types';
 import { User } from 'firebase/auth';
-import { onAuthChange, signOutUser, loadBookmarksForFile, saveBookmarksForFile } from './services/firebaseService';
+import * as firebaseService from './services/firebaseService';
 import { firebaseConfig } from './firebaseConfig';
 import { AuthTroubleshooting } from './components/AuthTroubleshooting';
 import { AuthModal } from './components/AuthModal';
@@ -38,7 +38,7 @@ const App: React.FC = () => {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const { toc, setToc, loading: parsingPdf, error: pdfError, loadingMessage } = useTocGenerator(pdfFile);
   
-  const [selectedChapter, setSelectedChapter] = useState<string | null>(null);
+  const [selectedChapter, setSelectedChapter] = useState<{title: string, index: number} | null>(null);
   const [chapterText, setChapterText] = useState<string>('');
   
   const [selectedVoice, setSelectedVoice] = useState<string>('Kore');
@@ -59,7 +59,8 @@ const App: React.FC = () => {
   const [isSavingBookmark, setIsSavingBookmark] = useState(false);
   const pdfKey = useMemo(() => pdfFile ? cacheService.getCacheKey(pdfFile) : null, [pdfFile]);
 
-  const [cachedBooks, setCachedBooks] = useState<CachedBook[]>([]);
+  const [userBooks, setUserBooks] = useState<Book[]>([]);
+  const [selectedBook, setSelectedBook] = useState<Book | null>(null);
 
   const [isAudioFullyLoaded, setIsAudioFullyLoaded] = useState<boolean>(false);
   const audioCache = useRef<Map<number, { audioData: string; text: string }>>(new Map());
@@ -76,10 +77,6 @@ const App: React.FC = () => {
   const isGeneratingAudio = isAudioRequested && !isAudioFullyLoaded;
 
   useEffect(() => {
-    cacheService.getAllCachedBooks().then(setCachedBooks);
-  }, []);
-
-  useEffect(() => {
     if(currentSentenceIndex > -1 && sentenceRefs.current[currentSentenceIndex]) {
       sentenceRefs.current[currentSentenceIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -87,10 +84,14 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (isFirebaseConfigured) {
-      const unsubscribe = onAuthChange((user) => {
+      const unsubscribe = firebaseService.onAuthChange(async (user) => {
         setUser(user);
         if (user) {
           setIsAuthModalOpen(false); // Close modal on successful auth change
+          const books = await firebaseService.getUserBooks(user.uid);
+          setUserBooks(books);
+        } else {
+          setUserBooks([]); // Clear books on sign out
         }
       });
       return () => unsubscribe();
@@ -101,7 +102,7 @@ const App: React.FC = () => {
     const loadBookmarks = async () => {
       if (user && pdfKey && isFirebaseConfigured) {
         try {
-          const storedBookmarks = await loadBookmarksForFile(user.uid, pdfKey);
+          const storedBookmarks = await firebaseService.loadBookmarksForFile(user.uid, pdfKey);
           setBookmarks(storedBookmarks || {});
         } catch (e) {
           console.error("Failed to load bookmarks:", e);
@@ -137,25 +138,25 @@ const App: React.FC = () => {
     setPdfProcessingError(pdfError);
   }, [pdfError]);
   
+  // When usePdfParser hook finishes, if it's a new book, save it to Firestore
   useEffect(() => {
-      // When usePdfParser hook finishes and generates a ToC for a NEW file, cache it.
-      if (pdfFile && !parsingPdf && toc.length > 0) {
-          const key = cacheService.getCacheKey(pdfFile);
-          cacheService.getTOC(key).then(cachedToc => {
-              if (!cachedToc) {
-                  cacheService.savePDF(key, pdfFile.name, pdfFile);
-                  cacheService.saveTOC(key, toc);
-                  cacheService.getAllCachedBooks().then(setCachedBooks);
-              }
-          });
-      }
-  }, [toc, parsingPdf, pdfFile]);
+    if (user && pdfFile && pdfFile.size > 0 && !parsingPdf && toc.length > 0) {
+        const currentPdfKey = cacheService.getCacheKey(pdfFile);
+        const bookExists = userBooks.some(book => book.pdfKey === currentPdfKey);
+        if (!bookExists) {
+            firebaseService.saveBook(user.uid, pdfFile, toc).then((newBook) => {
+                // Add the new book to the local state to refresh the UI
+                setUserBooks(currentBooks => [newBook, ...currentBooks.sort((a,b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0))]);
+            });
+        }
+    }
+}, [toc, parsingPdf, pdfFile, user, userBooks]);
 
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file && file.type === 'application/pdf') {
-      resetState(false); // Don't clear the file list
+      resetState();
       setPdfFile(file);
     } else {
       setPdfProcessingError('Please upload a valid PDF file.');
@@ -163,24 +164,37 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSelectCachedBook = async (key: string) => {
-      resetState(false);
-      const [cachedPdf, cachedToc] = await Promise.all([
-          cacheService.getPDF(key),
-          cacheService.getTOC(key)
-      ]);
-      if (cachedPdf && cachedToc) {
-          setPdfFile(cachedPdf);
-          setToc(cachedToc);
-      } else {
-          setPdfProcessingError("Failed to load book from cache. It might have been cleared.");
-          // remove the book from cache list
-          setCachedBooks(books => books.filter(b => b.key !== key));
-          await cacheService.deleteBook(key);
-      }
+  const handleSelectCachedBook = async (book: Book) => {
+      resetState();
+      setSelectedBook(book);
+      // A placeholder File object is created. The real file will be downloaded if needed for text extraction.
+      const placeholderFile = new File([], book.fileName, { type: 'application/pdf' });
+      setPdfFile(placeholderFile);
+      setToc(book.toc);
   };
 
-  const resetState = (clearFileList: boolean) => {
+  const handleDeleteBook = async (e: React.MouseEvent, bookToDelete: Book) => {
+    e.stopPropagation(); // Prevent handleSelectCachedBook from firing
+    if (!user) return;
+    
+    // Optimistically update UI
+    setUserBooks(currentBooks => currentBooks.filter(b => b.pdfKey !== bookToDelete.pdfKey));
+
+    try {
+        await firebaseService.deleteBook(user.uid, bookToDelete);
+        // If the deleted book was the currently active one, reset the view
+        if (pdfKey === bookToDelete.pdfKey) {
+          resetState();
+          setPdfFile(null);
+        }
+    } catch (error) {
+        console.error("Failed to delete book:", error);
+        // Revert UI if deletion fails
+        firebaseService.getUserBooks(user.uid).then(setUserBooks);
+    }
+  };
+
+  const resetState = () => {
     handleStopAudio();
     textExtractionSessionId.current++; // Invalidate any ongoing text extraction
     setSelectedChapter(null);
@@ -191,11 +205,7 @@ const App: React.FC = () => {
     setBookmarks({});
     setIsTextExtracting(false);
     isTextExtractionComplete.current = false;
-    setPdfFile(null);
-    setToc([]);
-    if (clearFileList) {
-      setCachedBooks([]);
-    }
+    setSelectedBook(null);
   };
   
   const handleStopAudio = () => {
@@ -210,11 +220,11 @@ const App: React.FC = () => {
     requestedChunkIndexCounter.current = 0;
   };
   
-  const handleSelectChapter = useCallback(async (chapterTitle: string) => {
-    if (!pdfFile || !pdfKey || selectedChapter === chapterTitle) return;
+  const handleSelectChapter = useCallback(async (chapterTitle: string, index: number) => {
+    if (!pdfFile || !pdfKey || selectedChapter?.title === chapterTitle) return;
 
     handleStopAudio();
-    setSelectedChapter(chapterTitle);
+    setSelectedChapter({ title: chapterTitle, index });
     setChapterText('');
     setPlaybackError(null);
     audioCache.current.clear();
@@ -224,25 +234,46 @@ const App: React.FC = () => {
     textExtractionSessionId.current++;
     const sessionId = textExtractionSessionId.current;
     
-    // Check cache first
-    const cachedText = await cacheService.getChapterText(pdfKey, chapterTitle);
-    if (cachedText) {
-        setChapterText(cachedText);
+    let chapterTextContent: string | null = null;
+    
+    // If logged in, check Firestore first
+    if (user) {
+        chapterTextContent = await firebaseService.getChapterText(user.uid, pdfKey, index);
+    }
+
+    if (chapterTextContent) {
+        setChapterText(chapterTextContent);
         isTextExtractionComplete.current = true;
         setIsTextExtracting(false);
         return;
     }
     
     try {
+      let fileToProcess = pdfFile;
+      // If the current file is a placeholder (size 0), download the real one from storage.
+      if (fileToProcess.size === 0 && selectedBook?.pdfDownloadUrl) {
+        const response = await fetch(selectedBook.pdfDownloadUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to download PDF for processing: ${response.statusText}`);
+        }
+        const blob = await response.blob();
+        fileToProcess = new File([blob], selectedBook.fileName, { type: 'application/pdf' });
+        setPdfFile(fileToProcess); // Update state for subsequent chapter selections
+      }
+
       let fullText = '';
-      await extractChapterText(pdfFile, chapterTitle, (textChunk) => {
+      await extractChapterText(fileToProcess, chapterTitle, (textChunk) => {
         if (sessionId !== textExtractionSessionId.current) return; // Stale request
         fullText += textChunk;
         setChapterText(prev => prev + textChunk);
       });
+
       if (sessionId === textExtractionSessionId.current) {
         isTextExtractionComplete.current = true;
-        await cacheService.saveChapterText(pdfKey, chapterTitle, fullText);
+        // If logged in, save the newly extracted text to Firestore
+        if (user && pdfKey) {
+            await firebaseService.saveChapterText(user.uid, pdfKey, index, fullText);
+        }
       }
     } catch (e) {
       if (sessionId === textExtractionSessionId.current) {
@@ -253,7 +284,7 @@ const App: React.FC = () => {
         setIsTextExtracting(false);
       }
     }
-  }, [pdfFile, pdfKey, selectedChapter, handlePlaybackError]);
+  }, [pdfFile, pdfKey, selectedChapter, user, handlePlaybackError, selectedBook]);
 
   const handlePlay = async (startFromBookmark?: Bookmark) => {
     if (!selectedChapter) return;
@@ -297,24 +328,49 @@ const App: React.FC = () => {
     const sentences = unprocessedText.match(sentenceRegex);
 
     const processChunk = async (textChunk: string, chunkIndex: number) => {
-        if (textChunk.trim().length === 0) return;
-
+        if (textChunk.trim().length === 0 || sessionId !== audioGenerationSessionId.current) return;
+        
         try {
-            // Check cache for audio chunk
-            const audioKey = `${selectedVoice}_${selectedSlang}`;
-            let audioData = await cacheService.getAudioChunk(pdfKey, selectedChapter, audioKey, chunkIndex);
+            const audioProfileKey = `${selectedVoice}_${selectedSlang}`;
+            const audioKey = `${audioProfileKey}_${chunkIndex}`;
             
-            if (!audioData) {
-                audioData = await generateSpeech(textChunk, selectedVoice, selectedSlang);
-                await cacheService.saveAudioChunk(pdfKey, selectedChapter, audioKey, chunkIndex, audioData);
+            // 1. Check local cache (IndexedDB)
+            let audioData = await cacheService.getAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex);
+            
+            // 2. Check cloud if not found locally and user is logged in
+            if (!audioData && user) {
+                const audioUrl = await firebaseService.getAudioChunkUrl(user.uid, pdfKey, audioKey);
+                if (audioUrl) {
+                    const response = await fetch(audioUrl);
+                    if (response.ok) {
+                        audioData = await response.text();
+                        // Save to local cache for future plays on this device
+                        if (audioData) {
+                             await cacheService.saveAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex, audioData);
+                        }
+                    }
+                }
             }
             
-            if (sessionId === audioGenerationSessionId.current) {
+            // 3. Generate if it doesn't exist anywhere
+            if (!audioData) {
+                audioData = await generateSpeech(textChunk, selectedVoice, selectedSlang);
+                // Save to local cache
+                await cacheService.saveAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex, audioData);
+                // Upload to cloud for cross-device access
+                if (user) {
+                    await firebaseService.uploadAndSaveAudioChunk(user.uid, pdfKey, audioKey, audioData);
+                }
+            }
+            
+            if (sessionId === audioGenerationSessionId.current && audioData) {
                 audioCache.current.set(chunkIndex, { audioData, text: textChunk });
                 addAudioChunkToQueue(audioData, textChunk, chunkIndex);
             }
         } catch (e) {
-            handlePlaybackError(e, `generate/load audio for chunk ${chunkIndex}`);
+            if (sessionId === audioGenerationSessionId.current) {
+                handlePlaybackError(e, `generate/load audio for chunk ${chunkIndex}`);
+            }
         }
     }
 
@@ -354,7 +410,7 @@ const App: React.FC = () => {
             processedTextLength.current += processedTextInThisRun.length;
         }
     }
-  }, [isAudioRequested, chapterText, selectedChapter, selectedVoice, selectedSlang, pdfKey, handlePlaybackError]);
+  }, [isAudioRequested, chapterText, selectedChapter, selectedVoice, selectedSlang, pdfKey, user, handlePlaybackError]);
 
 
   const handlePlayPauseToggle = () => {
@@ -393,17 +449,17 @@ const App: React.FC = () => {
     setIsSavingBookmark(true);
     const newBookmark: Bookmark = {
         id: Date.now().toString(),
-        chapterTitle: selectedChapter,
+        chapterTitle: selectedChapter.title,
         chunkIndex: state.chunkIndex,
         startOffset: state.startOffset,
         displayText: state.currentTextChunk.substring(0, 50) + '...'
     };
     
-    const updatedChapterBookmarks = [...(bookmarks[selectedChapter] || []), newBookmark];
-    const newBookmarks = { ...bookmarks, [selectedChapter]: updatedChapterBookmarks };
+    const updatedChapterBookmarks = [...(bookmarks[selectedChapter.title] || []), newBookmark];
+    const newBookmarks = { ...bookmarks, [selectedChapter.title]: updatedChapterBookmarks };
     
     try {
-        await saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
+        await firebaseService.saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
         setBookmarks(newBookmarks);
     } catch(e) {
         console.error("Failed to save bookmark:", e);
@@ -415,20 +471,15 @@ const App: React.FC = () => {
   const handleDeleteBookmark = async (bookmarkId: string) => {
     if (!user || !pdfKey || !selectedChapter) return;
     
-    const updatedChapterBookmarks = (bookmarks[selectedChapter] || []).filter(b => b.id !== bookmarkId);
-    const newBookmarks = { ...bookmarks, [selectedChapter]: updatedChapterBookmarks };
+    const updatedChapterBookmarks = (bookmarks[selectedChapter.title] || []).filter(b => b.id !== bookmarkId);
+    const newBookmarks = { ...bookmarks, [selectedChapter.title]: updatedChapterBookmarks };
 
     try {
-        await saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
+        await firebaseService.saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
         setBookmarks(newBookmarks);
     } catch(e) {
         console.error("Failed to delete bookmark:", e);
     }
-  };
-
-  const handleClearCache = async () => {
-      await cacheService.clearAllData();
-      resetState(true);
   };
 
   const getStatusMessage = () => {
@@ -469,19 +520,26 @@ const App: React.FC = () => {
                     </div>
                     {pdfProcessingError && <p className="text-red-400 my-4">{pdfProcessingError}</p>}
 
-                    {cachedBooks.length > 0 && (
+                    {user && userBooks.length > 0 && (
                         <div>
-                            <h3 className="text-lg font-semibold text-gray-300 mb-4">Or Continue Reading</h3>
+                            <h3 className="text-lg font-semibold text-gray-300 mb-4">Or Continue from Your Library</h3>
                             <ul className="space-y-2">
-                                {cachedBooks.map(book => (
-                                    <li key={book.key}>
-                                        <button onClick={() => handleSelectCachedBook(book.key)} className="w-full text-left p-3 bg-gray-700/50 rounded-md hover:bg-gray-700 transition-colors">
-                                            {book.name}
+                                {userBooks.map(book => (
+                                    <li key={book.pdfKey} onClick={() => handleSelectCachedBook(book)}
+                                      className="group w-full text-left p-3 bg-gray-700/50 rounded-md hover:bg-gray-700 transition-colors cursor-pointer flex justify-between items-center">
+                                        <span>{book.fileName}</span>
+                                        <button onClick={(e) => handleDeleteBook(e, book)} className="p-1 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <TrashIcon className="w-4 h-4" />
                                         </button>
                                     </li>
                                 ))}
                             </ul>
                         </div>
+                    )}
+                    {!user && (
+                      <p className="text-gray-400 mt-6">
+                        <button onClick={() => setIsAuthModalOpen(true)} className="text-indigo-400 hover:underline font-semibold">Sign in</button> to save books to your library and access them from any device.
+                      </p>
                     )}
                 </div>
             </div>
@@ -492,8 +550,8 @@ const App: React.FC = () => {
         return (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
                 <p className="text-red-400 max-w-md">{pdfProcessingError}</p>
-                <button onClick={() => resetState(false)} className="mt-4 px-6 py-2 bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors">
-                    Try another file
+                <button onClick={() => { setPdfFile(null); setPdfProcessingError(null); setToc([]); }} className="mt-4 px-6 py-2 bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors">
+                    Back to Library
                 </button>
             </div>
         );
@@ -506,9 +564,9 @@ const App: React.FC = () => {
             <aside className="w-1/4 bg-gray-900/50 p-4 overflow-y-auto border-r border-gray-700">
                 <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><BookOpenIcon className="w-6 h-6" /> Table of Contents</h2>
                 <ul className="space-y-2">
-                    {toc.map((chapter) => (
-                        <li key={chapter} onClick={() => handleSelectChapter(chapter)}
-                            className={`p-2 rounded-md cursor-pointer transition-colors text-sm ${selectedChapter === chapter ? 'bg-indigo-600 text-white' : 'hover:bg-gray-700'}`}>
+                    {toc.map((chapter, index) => (
+                        <li key={chapter} onClick={() => handleSelectChapter(chapter, index)}
+                            className={`p-2 rounded-md cursor-pointer transition-colors text-sm ${selectedChapter?.title === chapter ? 'bg-indigo-600 text-white' : 'hover:bg-gray-700'}`}>
                             {chapter}
                         </li>
                     ))}
@@ -518,7 +576,7 @@ const App: React.FC = () => {
                 <div className="p-6 overflow-y-auto flex-1" ref={contentRef}>
                     {selectedChapter ? (
                         <>
-                            <h1 className="text-2xl font-bold mb-2">{selectedChapter}</h1>
+                            <h1 className="text-2xl font-bold mb-2">{selectedChapter.title}</h1>
                             <div className="prose prose-invert max-w-none text-gray-300 leading-relaxed">
                                 {sentences.map((sentence, index) => (
                                     <span key={index} ref={el => sentenceRefs.current[index] = el}
@@ -597,9 +655,9 @@ const App: React.FC = () => {
                  {user && selectedChapter && (
                     <div className="p-4 border-t border-gray-700 bg-gray-900/30">
                         <h3 className="text-md font-semibold mb-2">Bookmarks for this chapter:</h3>
-                        {(bookmarks[selectedChapter] || []).length > 0 ? (
+                        {(bookmarks[selectedChapter.title] || []).length > 0 ? (
                             <ul className="space-y-2 max-h-24 overflow-y-auto">
-                                {(bookmarks[selectedChapter] || []).map(b => (
+                                {(bookmarks[selectedChapter.title] || []).map(b => (
                                     <li key={b.id} className="flex items-center justify-between p-2 bg-gray-800 rounded-md text-sm">
                                         <button onClick={() => handlePlay(b)} className="text-left hover:text-indigo-400">
                                             "{b.displayText}"
@@ -623,16 +681,19 @@ const App: React.FC = () => {
         <header className="flex items-center justify-between p-4 bg-gray-900/50 backdrop-blur-sm border-b border-gray-700">
             <h1 className="text-xl font-bold tracking-wider text-white">AI Book Narrator</h1>
             <div className="flex items-center gap-3">
-                {cachedBooks.length > 0 && (
-                     <button onClick={handleClearCache} className="px-3 py-1.5 text-sm border border-gray-600 rounded-md hover:bg-red-800 hover:border-red-700 transition-colors">Clear All Books</button>
+                {pdfFile && (
+                  <button onClick={() => { setPdfFile(null); resetState(); }} className="px-3 py-1.5 text-sm border border-gray-600 rounded-md hover:bg-gray-700 transition-colors">Back to Library</button>
                 )}
+                 {user && userBooks.length > 0 && (
+                     <button onClick={cacheService.clearAllData} className="px-3 py-1.5 text-sm border border-gray-600 rounded-md hover:bg-gray-700 transition-colors">Clear Audio Cache</button>
+                 )}
                 {isFirebaseConfigured && (
                     <>
                         {user ? (
                             <div className="flex items-center gap-3">
                                 <img src={user.photoURL || `https://api.dicebear.com/8.x/initials/svg?seed=${user.email}`} alt={user.displayName || 'User'} className="w-8 h-8 rounded-full bg-gray-600" />
                                 <span className="text-sm hidden sm:inline">{user.displayName || user.email}</span>
-                                <button onClick={signOutUser} className="px-3 py-1.5 text-sm border border-gray-600 rounded-md hover:bg-gray-700 transition-colors">Sign Out</button>
+                                <button onClick={firebaseService.signOutUser} className="px-3 py-1.5 text-sm border border-gray-600 rounded-md hover:bg-gray-700 transition-colors">Sign Out</button>
                             </div>
                         ) : (
                             <button onClick={() => setIsAuthModalOpen(true)} className="px-4 py-2 text-sm bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 transition-colors">

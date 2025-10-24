@@ -10,12 +10,14 @@
 
 -   **PDF to Audiobook:** Upload any PDF file and have it read aloud.
 -   **AI-Powered Content Analysis:** Gemini intelligently verifies if the uploaded PDF is a book and automatically generates a table of contents, even if one isn't explicitly present.
+-   **Persistent Cloud Library:** Sign in to save your processed books to a personal library. Access your books, including their generated table of contents and extracted text, from any device at any time.
+-   **Cross-Device Audio Caching:** Generated audio is saved to your account in the cloud, so you never have to regenerate it, even when switching devices.
 -   **Dynamic Narration:** Listen in a standard voice or choose from a variety of creative styles like "Gen Z," "Pirate," or "Shakespearean actor."
 -   **Multiple Voices:** Select from a range of high-quality male and female voices.
 -   **Streaming Playback:** Audio is generated and streamed in chunks for a smooth, near-instant listening experience.
 -   **Real-time Highlighting:** Follow along as the currently spoken sentence is highlighted in the text.
 -   **Full Playback Control:** Play, pause, resume, and stop narration at any time.
--   **Cloud-Synced Bookmarks:** Sign in with Google to save your progress. Create bookmarks at any point in a chapter and seamlessly resume listening later. Your bookmarks are saved per-book.
+-   **Cloud-Synced Bookmarks:** Save your progress within any chapter. Your bookmarks are synced to your account and available across all your devices.
 -   **Sleek & Responsive UI:** A modern, user-friendly interface built with TailwindCSS that works beautifully on all screen sizes.
 
 ## 🛠️ Technology Stack
@@ -23,7 +25,8 @@
 -   **Frontend:** [React](https://reactjs.org/) & [TypeScript](https://www.typescriptlang.org/)
 -   **Styling:** [TailwindCSS](https://tailwindcss.com/)
 -   **AI Model:** [Google Gemini API](https://ai.google.dev/docs) (specifically `gemini-2.5-pro` for text processing and `gemini-2.5-flash-preview-tts` for text-to-speech)
--   **Backend & Authentication:** [Firebase](https://firebase.google.com/) (Authentication for Google Sign-In, Firestore for bookmark storage)
+-   **Backend & Data Persistence:** [Firebase](https://firebase.google.com/) (Authentication, Firestore for metadata, and Cloud Storage for audio files)
+-   **Client-Side Caching:** IndexedDB for performance-caching of audio to provide instant playback on repeat listens.
 
 ## 🚀 Getting Started
 
@@ -56,23 +59,37 @@ Follow these instructions to get a copy of the project up and running on your lo
     -   Go to the [Firebase Console](https://console.firebase.google.com/) and create a new project.
     -   In your new project, go to **Project Settings** and copy your web app's Firebase configuration object.
     -   Paste this configuration into the `src/firebaseConfig.ts` file, replacing the existing configuration.
-    -   Enable **Authentication**:
+    -   **Enable Authentication**:
         -   Go to the **Authentication** section.
         -   Click "Get started".
-        -   Under the "Sign-in method" tab, enable **Google** as a sign-in provider.
+        -   Under the "Sign-in method" tab, enable both **Email/Password** and **Google** as sign-in providers.
         -   **Crucially**, add your development domain (e.g., `localhost`) to the list of **Authorized domains**.
-    -   Enable **Firestore Database**:
+    -   **Enable Firestore Database**:
         -   Go to the **Firestore Database** section.
         -   Create a database in **Production mode**.
-        -   Go to the **Rules** tab and update the rules to use a more robust, user-centric structure. This allows authenticated users to read and write any documents within their own user-specific collection, preventing permission errors. Use the following rules:
+        -   Go to the **Rules** tab and paste the following rules. This allows authenticated users to read and write any documents within their own user-specific collection, which is essential for saving their library and bookmarks.
             ```
             rules_version = '2';
             service cloud.firestore {
               match /databases/{database}/documents {
-                // Allow users to read/write any documents (like their bookmarks)
-                // stored under a top-level `users` collection, keyed by their user ID.
+                // Allow users to read/write any documents (books, chapters, audio URLs, bookmarks)
+                // stored under their own user ID.
                 match /users/{userId}/{document=**} {
                   allow read, write: if request.auth.uid == userId;
+                }
+              }
+            }
+            ```
+    -   **Enable Cloud Storage**:
+        -   Go to the **Storage** section.
+        -   Click "Get started" and follow the prompts to create a storage bucket in **Production mode**.
+        -   Go to the **Rules** tab and paste the following rules. This allows authenticated users to manage files (read, write, list, and delete) within their own private, user-specific folder.
+            ```
+            service firebase.storage {
+              match /b/{bucket}/o {
+                // Allow users to manage files within their own user-specific folder.
+                match /users/{userId}/{path=**} {
+                  allow read, write, list, delete: if request.auth != null && request.auth.uid == userId;
                 }
               }
             }
@@ -86,18 +103,18 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 ## ⚙️ How It Works
 
-1.  **PDF Upload:** The user uploads a PDF file.
-2.  **Content Verification:** A `gemini-2.5-flash` call analyzes the PDF's structure to determine if it's a book. This prevents users from uploading invoices or presentations.
-3.  **ToC Generation:** A `gemini-2.5-pro` call reads the entire PDF and generates a structured table of contents based on headings and chapter breaks.
-4.  **Chapter Selection:** The user selects a chapter from the generated ToC.
-5.  **Text Extraction:** `gemini-2.5-pro` is used again to extract the full, clean text for the selected chapter. The text is streamed to the UI for immediate display.
-6.  **Audio Generation & Streaming:**
-    -   The chapter text is split into smaller, manageable chunks (e.g., 5-7 sentences).
-    -   For each chunk, a request is made to the `gemini-2.5-flash-preview-tts` model, including the desired voice and narration style prompt (e.g., "Narrate in the style of a pirate...").
-    -   The service returns raw audio data encoded in base64.
-7.  **Custom Audio Service:** A custom service in `src/services/audioService.ts` manages a queue of these audio chunks. It decodes the audio and uses the Web Audio API for seamless, gapless playback.
-8.  **Real-time Highlighting:** The audio service estimates the duration of each sentence and uses timeouts to update the UI, highlighting the sentence currently being spoken.
-9.  **Bookmark Persistence:** When a user logs in and creates a bookmark, the current playback state is saved to their user-specific document in the `users/{userId}/bookmarks/{pdfKey}` path in Firestore.
+1.  **User Authentication:** The user signs in via Google or Email/Password, creating a secure context for their data.
+2.  **PDF Upload & Cloud Storage:** When a user uploads a new book, the original PDF file is securely uploaded to Firebase Storage.
+3.  **AI Processing (New Books):**
+    -   **Content Verification & ToC Generation:** `gemini-2.5-pro` analyzes the PDF to verify it's a book and generates a structured table of contents.
+    -   **Save to Cloud:** The book's metadata (including a link to the stored PDF) and ToC are saved to the user's library in Firestore.
+4.  **Chapter Selection & Text Extraction:** When a chapter is selected, the app checks Firestore for the extracted text. If it's not there, it transparently retrieves the stored PDF from the cloud, `gemini-2.5-pro` extracts the text, and the result is saved to Firestore for all future sessions on any device.
+5.  **Multi-Layered Audio Caching & Generation:**
+    -   **Level 1 (Local Cache):** The app first checks the browser's IndexedDB for the required audio chunk. If found, playback is instant.
+    -   **Level 2 (Cloud Cache):** If not found locally, it checks Firestore for a URL to the audio file in Cloud Storage. If a URL exists, the audio is downloaded, played, and saved to the local cache for future speed.
+    -   **Level 3 (New Generation):** If the audio doesn't exist anywhere, `gemini-2.5-flash-preview-tts` generates it. The new audio is then uploaded to Cloud Storage, its URL is saved to Firestore, and the audio data itself is cached locally in IndexedDB.
+6.  **Streaming Playback:** A custom audio service uses the Web Audio API for seamless, gapless playback and real-time sentence highlighting.
+7.  **Bookmark Persistence:** Bookmarks are saved to Firestore, ensuring they are synced across all of the user's devices.
 
 ---
 
