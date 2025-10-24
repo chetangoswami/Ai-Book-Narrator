@@ -1,0 +1,5 @@
+{
+  "name": "AI Book Narrator",
+  "description": "Upload a PDF of any book and have it read back to you in a variety of creative styles and slangs, powered by Gemini.",
+  "requestFramePermissions": []
+}
