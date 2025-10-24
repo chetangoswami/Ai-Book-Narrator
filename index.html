@@ -16,6 +16,12 @@
         transform-origin: bottom;
         height: 100%;
       }
+      @keyframes blink-cursor {
+        50% { opacity: 0; }
+      }
+      .animate-blink-cursor {
+        animation: blink-cursor 1s step-end infinite;
+      }
     </style>
   <script type="importmap">
 {

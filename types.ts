@@ -5,3 +5,8 @@ export interface Bookmark {
   startOffset: number; // Time in seconds within the chunk's audio
   displayText: string; // A snippet of the text for UI display
 }
+
+export interface CachedBook {
+  key: string;
+  name: string;
+}

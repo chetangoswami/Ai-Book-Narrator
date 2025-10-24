@@ -16,6 +16,8 @@ export const useTocGenerator = (file: File | null) => {
       return;
     }
 
+    // This effect should only run for new files, not cached ones
+    // The check for cached TOC happens in the App component.
     const processPdf = async () => {
       setLoading(true);
       setError(null);
@@ -52,5 +54,5 @@ export const useTocGenerator = (file: File | null) => {
 
   }, [file]);
 
-  return { toc, loading, error, loadingMessage };
+  return { toc, setToc, loading, error, loadingMessage };
 };
