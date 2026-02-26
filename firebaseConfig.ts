@@ -2,7 +2,7 @@
 
 // This configuration has been updated with your Firebase project details.
 export const firebaseConfig = {
-  apiKey: "AIzaSyD3j8CmdI-v5mpL9KANl_KQpyNqW1l0eQ8",
+  apiKey: "",
   authDomain: "ai-book-narrator.firebaseapp.com",
   projectId: "ai-book-narrator",
   storageBucket: "ai-book-narrator.firebasestorage.app",
