@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Puter.js Sandbox</title>
+    <!-- Injecting the User-Pays API gateway script -->
+    <script src="https://js.puter.com/v2/"></script>
+</head>
+<body style="font-family: Arial, sans-serif; padding: 2rem;">
+    <h1>Testing Free Gemini Access via Puter.js</h1>
+    <p>Upload a PDF to see if Puter.js natively supports large binary file attachments to <code>puter.ai.chat</code> exactly like the official SDK does.</p>
+    
+    <input type="file" id="pdfInput" accept="application/pdf" style="margin-bottom: 1rem;">
+    
+    <div id="output" style="white-space: pre-wrap; background: #1e1e1e; color: #fff; padding: 1rem; border-radius: 8px;">Waiting for a file...</div>
+
+    <script>
+        document.getElementById('pdfInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                const base64DataUrl = event.target.result;
+                const outputDiv = document.getElementById('output');
+                
+                outputDiv.innerText = "Attempting to push massive PDF payload to Puter's Gemini proxy...\n";
+                
+                try {
+                    // Try to attach the PDF Data URI block to the Gemini prompt exactly as they demoed with Images
+                    const response = await puter.ai.chat(
+                        "Please act as a summarizer. Extract the Table of Contents from this book and return it as JSON.",
+                        base64DataUrl,
+                        { model: 'gemini-3.1-pro-preview', stream: true }
+                    );
+                    
+                    outputDiv.innerText += "\n[SUCCESS] Connection Established!\n\nResponse Stream:\n";
+                    
+                    for await (const part of response) {
+                        if (part?.text) {
+                            outputDiv.innerText += part.text;
+                        }
+                    }
+                } catch (error) {
+                    outputDiv.innerText += "\n[FAILED]\n" + error.message + "\n\n(It's possible Puter.js only supports basic image vision, not document parsing).";
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+    </script>
+</body>
+</html>
