@@ -40,6 +40,20 @@
 </script>
 </head>
   <body class="bg-gray-900 text-white">
+    <script>
+      window.addEventListener('error', (e) => {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'color: red; position: fixed; top: 0; left: 0; right: 0; background: black; padding: 10px; z-index: 9999; word-wrap: break-word;';
+        errorDiv.textContent = 'Runtime Error: ' + e.message + ' at ' + e.filename + ':' + e.lineno;
+        document.body.appendChild(errorDiv);
+      });
+      window.addEventListener('unhandledrejection', (e) => {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.cssText = 'color: orange; position: fixed; top: 50px; left: 0; right: 0; background: black; padding: 10px; z-index: 9999; word-wrap: break-word;';
+        errorDiv.textContent = 'Unhandled Rejection: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason));
+        document.body.appendChild(errorDiv);
+      });
+    </script>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
   </body>

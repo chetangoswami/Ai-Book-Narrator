@@ -9,7 +9,7 @@ export interface Bookmark {
 export interface Book {
   pdfKey: string;
   fileName: string;
-  pdfDownloadUrl: string;
+  fileData: Blob | File;
   toc: string[];
-  createdAt: any; // Can be a server timestamp
+  createdAt: number;
 }

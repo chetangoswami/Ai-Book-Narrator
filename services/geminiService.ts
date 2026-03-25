@@ -1,9 +1,9 @@
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 
 const getAiClient = () => {
-    const API_KEY = process.env.API_KEY;
+    const API_KEY = localStorage.getItem('gemini_api_key') || process.env.API_KEY;
     if (!API_KEY) {
-      throw new Error("API_KEY environment variable is not set.");
+      throw new Error("MISSING_API_KEY");
     }
     return new GoogleGenAI({ apiKey: API_KEY });
 };
@@ -57,9 +57,10 @@ export const classifyPdfContent = async (file: File): Promise<{ isBook: boolean;
             throw new Error("Invalid JSON structure received from Gemini for PDF classification.");
         }
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error classifying PDF content:", error);
-        throw new Error("Failed to classify PDF content with Gemini.");
+        if (error.message === "MISSING_API_KEY") throw error;
+        throw new Error(`Failed to classify PDF content with Gemini: ${error.message || 'Unknown error'}`);
     }
 };
 
@@ -71,7 +72,7 @@ export const generateTableOfContents = async (file: File): Promise<string[]> => 
         const prompt = "Analyze the provided PDF and generate a table of contents. The book might not have an explicit one, so analyze the headings and structure to create one. Return it as a JSON array of strings, where each string is a chapter or section title. Example: [\"Chapter 1: The Beginning\", \"Chapter 2: The Journey\"]. Output ONLY the JSON array and nothing else.";
 
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-pro',
+            model: 'gemini-2.5-flash',
             contents: { parts: [{text: prompt}, pdfPart] },
             config: {
                 responseMimeType: 'application/json',
@@ -92,9 +93,10 @@ export const generateTableOfContents = async (file: File): Promise<string[]> => 
         const toc = JSON.parse(jsonString);
         return Array.isArray(toc) ? toc.filter(item => typeof item === 'string') : [];
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Error generating table of contents:", error);
-        throw new Error("Failed to generate table of contents with Gemini.");
+        if (error.message === "MISSING_API_KEY") throw error;
+        throw new Error(`Failed to generate table of contents with Gemini: ${error.message || 'Unknown error'}`);
     }
 };
 
@@ -105,16 +107,17 @@ export const extractChapterText = async (file: File, chapterTitle: string, onChu
         const prompt = `From the provided PDF, extract the full text for the chapter or section titled "${chapterTitle}". Extract only the text of that chapter/section, maintaining paragraph breaks. Do not include the chapter title in the output. Provide only the chapter's content without any extra commentary or explanations.`;
 
         const responseStream = await ai.models.generateContentStream({
-            model: 'gemini-2.5-pro',
+            model: 'gemini-2.5-flash',
             contents: { parts: [{text: prompt}, pdfPart] },
         });
         
         for await (const chunk of responseStream) {
             onChunk(chunk.text);
         }
-    } catch (error) {
+    } catch (error: any) {
         console.error(`Error extracting text for chapter "${chapterTitle}":`, error);
-        throw new Error("Failed to extract chapter text with Gemini.");
+        if (error.message === "MISSING_API_KEY") throw error;
+        throw new Error(`Failed to extract chapter text with Gemini: ${error.message || 'Unknown error'}`);
     }
 };
 

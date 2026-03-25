@@ -35,11 +35,13 @@ import { firebaseConfig } from '../firebaseConfig';
 import { Bookmark, Book } from '../types';
 
 // Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const storage = getStorage(app);
-const googleProvider = new GoogleAuthProvider();
+const _isConfigValid = firebaseConfig && firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY" && firebaseConfig.apiKey !== "";
+
+const app = _isConfigValid ? initializeApp(firebaseConfig) : (null as any);
+const auth = _isConfigValid ? getAuth(app) : (null as any);
+const db = _isConfigValid ? getFirestore(app) : (null as any);
+const storage = _isConfigValid ? getStorage(app) : (null as any);
+const googleProvider = _isConfigValid ? new GoogleAuthProvider() : (null as any);
 
 // --- AUTH FUNCTIONS ---
 
@@ -156,7 +158,7 @@ export const saveBook = async (userId: string, pdfFile: File, toc: string[]): Pr
 
         // Save book metadata to Firestore
         const bookDocRef = doc(db, 'users', userId, 'books', pdfKey);
-        const bookData: Book = {
+        const bookData: any = {
             pdfKey,
             fileName: pdfFile.name,
             pdfDownloadUrl: downloadURL,

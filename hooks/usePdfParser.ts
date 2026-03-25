@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { generateTableOfContents, classifyPdfContent } from '../services/geminiService';
 
 export const useTocGenerator = (file: File | null) => {
@@ -6,6 +6,11 @@ export const useTocGenerator = (file: File | null) => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
+  const [retryTrigger, setRetryTrigger] = useState<number>(0);
+
+  const retry = useCallback(() => {
+    setRetryTrigger(prev => prev + 1);
+  }, []);
 
   useEffect(() => {
     if (!file) {
@@ -59,7 +64,7 @@ export const useTocGenerator = (file: File | null) => {
     
     processPdf();
 
-  }, [file]);
+  }, [file, retryTrigger]);
 
-  return { toc, setToc, loading, error, loadingMessage };
+  return { toc, setToc, loading, error, loadingMessage, retry };
 };

@@ -14,7 +14,18 @@ async function decodeAudioData(
   data: Uint8Array,
   ctx: AudioContext,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  // Check for common audio headers (RIFF for WAV, ID3 or 0xFF for MP3, OggS for OGG)
+  const isWav = data.length > 4 && data[0] === 82 && data[1] === 73 && data[2] === 70 && data[3] === 70; // RIFF
+  const isMp3 = data.length > 3 && ((data[0] === 73 && data[1] === 68 && data[2] === 51) || (data[0] === 255 && (data[1] & 224) === 224)); // ID3 or FF E0
+  const isOgg = data.length > 4 && data[0] === 79 && data[1] === 103 && data[2] === 103 && data[3] === 83; // OggS
+
+  if (isWav || isMp3 || isOgg) {
+      const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      return await ctx.decodeAudioData(arrayBuffer as ArrayBuffer);
+  }
+
+  // Otherwise, fallback to the manual 16-bit PCM decoder for the Gemini API
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / 1; // Assuming mono
   const buffer = ctx.createBuffer(1, frameCount, 24000); // 24kHz, mono
   const channelData = buffer.getChannelData(0);

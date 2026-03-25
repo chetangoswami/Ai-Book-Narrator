@@ -1,10 +1,11 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { extractChapterText, generateSpeech } from './services/geminiService';
+import { generateSarvamSpeech } from './services/sarvamService';
 import { useTocGenerator } from './hooks/usePdfParser';
 import { startStreamingPlayback, addAudioChunkToQueue, stopAudio, pauseAudio, resumeAudio, getCurrentPlaybackState, signalEndOfStream } from './services/audioService';
-import { UploadIcon, BookOpenIcon, PlayIcon, StopIcon, SpeakerWaveIcon, PauseIcon, BookmarkIcon, TrashIcon } from './components/icons';
+import { UploadIcon, BookOpenIcon, PlayIcon, StopIcon, SpeakerWaveIcon, PauseIcon, BookmarkIcon, TrashIcon, CogIcon } from './components/icons';
 import { Spinner, ThinkingIndicator } from './components/Spinner';
-import { AVAILABLE_VOICES, VOICE_PREVIEW_TEXT, NARRATION_STYLES } from './constants';
+import { AVAILABLE_VOICES, SARVAM_VOICES, VOICE_PREVIEW_TEXT, NARRATION_STYLES } from './constants';
 import { playSimpleAudio } from './services/audioService';
 import { Bookmark, Book } from './types';
 import { User } from 'firebase/auth';
@@ -12,6 +13,7 @@ import * as firebaseService from './services/firebaseService';
 import { firebaseConfig } from './firebaseConfig';
 import { AuthTroubleshooting } from './components/AuthTroubleshooting';
 import { AuthModal } from './components/AuthModal';
+import { SettingsModal } from './components/SettingsModal';
 import * as cacheService from './services/cacheService';
 
 
@@ -24,6 +26,7 @@ declare global {
 const App: React.FC = () => {
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
   useEffect(() => {
     if (
@@ -36,14 +39,24 @@ const App: React.FC = () => {
 
   const [user, setUser] = useState<User | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const { toc, setToc, loading: parsingPdf, error: pdfError, loadingMessage } = useTocGenerator(pdfFile);
+  const { toc, setToc, loading: parsingPdf, error: pdfError, loadingMessage, retry: retryPdfParse } = useTocGenerator(pdfFile);
   
   const [selectedChapter, setSelectedChapter] = useState<{title: string, index: number} | null>(null);
   const [chapterText, setChapterText] = useState<string>('');
   
+  const [ttsProvider, setTtsProvider] = useState<string>('gemini');
   const [selectedVoice, setSelectedVoice] = useState<string>('Kore');
   const [selectedSlang, setSelectedSlang] = useState<string>('Standard');
   const [isReading, setIsReading] = useState<boolean>(false);
+  
+  useEffect(() => {
+     setTtsProvider(localStorage.getItem('tts_provider') || 'gemini');
+  }, []);
+  
+  // Conditionally switch default voices if the provider changes
+  useEffect(() => {
+      setSelectedVoice(ttsProvider === 'sarvam' ? 'amelia' : 'Kore');
+  }, [ttsProvider]);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   
   const [isTextExtracting, setIsTextExtracting] = useState<boolean>(false);
@@ -63,7 +76,13 @@ const App: React.FC = () => {
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
 
   const [isAudioFullyLoaded, setIsAudioFullyLoaded] = useState<boolean>(false);
-  const audioCache = useRef<Map<number, { audioData: string; text: string }>>(new Map());
+  const audioQueue = useRef<{ audioData: string, text: string, chunkIndex: number }[]>([]);
+
+  const audioCache = useRef<Map<number, { audioData: string, text: string }>>(new Map());
+  
+  // Singleton Queue for Audio Generation API calls
+  const generationQueue = useRef<{textChunk: string, chunkIndex: number, sessionId: number}[]>([]);
+  const isGeneratingQueue = useRef<boolean>(false);
 
   const contentRef = useRef<HTMLDivElement>(null);
   const sentenceRefs = useRef<(HTMLSpanElement | null)[]>([]);
@@ -88,21 +107,30 @@ const App: React.FC = () => {
         setUser(user);
         if (user) {
           setIsAuthModalOpen(false); // Close modal on successful auth change
-          const books = await firebaseService.getUserBooks(user.uid);
-          setUserBooks(books);
-        } else {
-          setUserBooks([]); // Clear books on sign out
         }
       });
       return () => unsubscribe();
     }
   }, [isFirebaseConfigured]);
 
+  // Load books locally
+  useEffect(() => {
+      const loadLocalBooks = async () => {
+          try {
+              const books = await cacheService.getAllBooks();
+              setUserBooks(books);
+          } catch(e) {
+              console.error("Failed to load local books", e);
+          }
+      };
+      loadLocalBooks();
+  }, []);
+
   useEffect(() => {
     const loadBookmarks = async () => {
-      if (user && pdfKey && isFirebaseConfigured) {
+      if (pdfKey) {
         try {
-          const storedBookmarks = await firebaseService.loadBookmarksForFile(user.uid, pdfKey);
+          const storedBookmarks = await cacheService.getBookmarks(pdfKey);
           setBookmarks(storedBookmarks || {});
         } catch (e) {
           console.error("Failed to load bookmarks:", e);
@@ -113,7 +141,7 @@ const App: React.FC = () => {
       }
     };
     loadBookmarks();
-  }, [user, pdfKey, isFirebaseConfigured]);
+  }, [pdfKey]);
   
   useEffect(() => {
     if (isReading || isAudioRequested) {
@@ -126,31 +154,67 @@ const App: React.FC = () => {
   const handlePlaybackError = useCallback((e: unknown, context: string) => {
     const errorMessage = e instanceof Error ? e.message : String(e);
     console.error(`Error during ${context}:`, e);
-    if (errorMessage.includes("PERMISSION_DENIED") || errorMessage.includes("Requested entity was not found")) {
+    
+    if (errorMessage.includes("MISSING_API_KEY")) {
+        setPlaybackError("A Gemini API Key is required. Please set it in the Settings.");
+        setIsSettingsModalOpen(true);
+    } else if (errorMessage.includes("PERMISSION_DENIED") || errorMessage.includes("Requested entity was not found")) {
         setPlaybackError("Permission denied. Ensure the 'Generative Language API' is enabled for your project.");
     } else {
-        setPlaybackError(`Failed to ${context}. Please try again.`);
+        setPlaybackError(`Failed to ${context}. Reason: ${errorMessage}`);
     }
     handleStopAudio();
   }, []);
 
   useEffect(() => {
-    setPdfProcessingError(pdfError);
+    if (pdfError && pdfError.includes("MISSING_API_KEY")) {
+        setPdfProcessingError("A Gemini API Key is required. Please set it in the Settings.");
+        setIsSettingsModalOpen(true);
+    } else {
+        setPdfProcessingError(pdfError);
+    }
   }, [pdfError]);
+
+  const handleSettingsSave = (apiKey: string) => {
+      setIsSettingsModalOpen(false);
+      setTtsProvider(localStorage.getItem('tts_provider') || 'gemini');
+      if (apiKey || localStorage.getItem('sarvam_api_key')) {
+          if (pdfFile && pdfProcessingError) {
+              setPdfProcessingError(null);
+              retryPdfParse();
+          }
+          if (playbackError) {
+              setPlaybackError(null);
+              if (selectedChapter && !isTextExtracting && chapterText.length === 0) {
+                  handleSelectChapter(selectedChapter.title, selectedChapter.index);
+              }
+          }
+      }
+  };
   
-  // When usePdfParser hook finishes, if it's a new book, save it to Firestore
+  // When usePdfParser hook finishes, if it's a new book, save it to IndexedDB
   useEffect(() => {
-    if (user && pdfFile && pdfFile.size > 0 && !parsingPdf && toc.length > 0) {
+    if (pdfFile && pdfFile.size > 0 && !parsingPdf && toc.length > 0) {
         const currentPdfKey = cacheService.getCacheKey(pdfFile);
         const bookExists = userBooks.some(book => book.pdfKey === currentPdfKey);
         if (!bookExists) {
-            firebaseService.saveBook(user.uid, pdfFile, toc).then((newBook) => {
+            const newBook: Book = {
+                pdfKey: currentPdfKey,
+                fileName: pdfFile.name,
+                fileData: pdfFile,
+                toc: toc,
+                createdAt: Date.now()
+            };
+            cacheService.saveBook(newBook).then(() => {
                 // Add the new book to the local state to refresh the UI
-                setUserBooks(currentBooks => [newBook, ...currentBooks.sort((a,b) => (b.createdAt?.toMillis() ?? 0) - (a.createdAt?.toMillis() ?? 0))]);
+                setUserBooks(currentBooks => [newBook, ...currentBooks.sort((a,b) => b.createdAt - a.createdAt)]);
+            }).catch((error) => {
+                console.error("Local Library sync failed:", error);
+                setPdfProcessingError(`Failed to save book to Local Browser Storage. Reason: ${error.message}`);
             });
         }
     }
-}, [toc, parsingPdf, pdfFile, user, userBooks]);
+}, [toc, parsingPdf, pdfFile, userBooks]);
 
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -167,21 +231,24 @@ const App: React.FC = () => {
   const handleSelectCachedBook = async (book: Book) => {
       resetState();
       setSelectedBook(book);
-      // A placeholder File object is created. The real file will be downloaded if needed for text extraction.
-      const placeholderFile = new File([], book.fileName, { type: 'application/pdf' });
-      setPdfFile(placeholderFile);
+      // Retrieve the physical File from the LocalBook object
+      if (book.fileData) {
+          setPdfFile(book.fileData as File);
+      } else {
+          setPdfProcessingError("Could not retrieve local PDF file.");
+          setPdfFile(null);
+      }
       setToc(book.toc);
   };
 
   const handleDeleteBook = async (e: React.MouseEvent, bookToDelete: Book) => {
     e.stopPropagation(); // Prevent handleSelectCachedBook from firing
-    if (!user) return;
     
     // Optimistically update UI
     setUserBooks(currentBooks => currentBooks.filter(b => b.pdfKey !== bookToDelete.pdfKey));
 
     try {
-        await firebaseService.deleteBook(user.uid, bookToDelete);
+        await cacheService.deleteBook(bookToDelete.pdfKey);
         // If the deleted book was the currently active one, reset the view
         if (pdfKey === bookToDelete.pdfKey) {
           resetState();
@@ -190,7 +257,7 @@ const App: React.FC = () => {
     } catch (error) {
         console.error("Failed to delete book:", error);
         // Revert UI if deletion fails
-        firebaseService.getUserBooks(user.uid).then(setUserBooks);
+        cacheService.getAllBooks().then(setUserBooks);
     }
   };
 
@@ -218,6 +285,7 @@ const App: React.FC = () => {
     setIsAudioFullyLoaded(false);
     processedTextLength.current = 0;
     requestedChunkIndexCounter.current = 0;
+    generationQueue.current = []; // Clear pending generation tasks
   };
   
   const handleSelectChapter = useCallback(async (chapterTitle: string, index: number) => {
@@ -236,10 +304,8 @@ const App: React.FC = () => {
     
     let chapterTextContent: string | null = null;
     
-    // If logged in, check Firestore first
-    if (user) {
-        chapterTextContent = await firebaseService.getChapterText(user.uid, pdfKey, index);
-    }
+    // Check Local Browser Database first
+    chapterTextContent = await cacheService.getChapterText(pdfKey, index);
 
     if (chapterTextContent) {
         setChapterText(chapterTextContent);
@@ -250,16 +316,6 @@ const App: React.FC = () => {
     
     try {
       let fileToProcess = pdfFile;
-      // If the current file is a placeholder (size 0), download the real one from storage.
-      if (fileToProcess.size === 0 && selectedBook?.pdfDownloadUrl) {
-        const response = await fetch(selectedBook.pdfDownloadUrl);
-        if (!response.ok) {
-          throw new Error(`Failed to download PDF for processing: ${response.statusText}`);
-        }
-        const blob = await response.blob();
-        fileToProcess = new File([blob], selectedBook.fileName, { type: 'application/pdf' });
-        setPdfFile(fileToProcess); // Update state for subsequent chapter selections
-      }
 
       let fullText = '';
       await extractChapterText(fileToProcess, chapterTitle, (textChunk) => {
@@ -270,9 +326,9 @@ const App: React.FC = () => {
 
       if (sessionId === textExtractionSessionId.current) {
         isTextExtractionComplete.current = true;
-        // If logged in, save the newly extracted text to Firestore
-        if (user && pdfKey) {
-            await firebaseService.saveChapterText(user.uid, pdfKey, index, fullText);
+        // Save the newly extracted text to Local DB
+        if (pdfKey) {
+            await cacheService.saveChapterText(pdfKey, index, fullText);
         }
       }
     } catch (e) {
@@ -337,30 +393,29 @@ const App: React.FC = () => {
             // 1. Check local cache (IndexedDB)
             let audioData = await cacheService.getAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex);
             
-            // 2. Check cloud if not found locally and user is logged in
-            if (!audioData && user) {
-                const audioUrl = await firebaseService.getAudioChunkUrl(user.uid, pdfKey, audioKey);
-                if (audioUrl) {
-                    const response = await fetch(audioUrl);
-                    if (response.ok) {
-                        audioData = await response.text();
-                        // Save to local cache for future plays on this device
-                        if (audioData) {
-                             await cacheService.saveAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex, audioData);
-                        }
-                    }
-                }
-            }
-            
-            // 3. Generate if it doesn't exist anywhere
+            // 2. Generating if it doesn't exist locally
             if (!audioData) {
-                audioData = await generateSpeech(textChunk, selectedVoice, selectedSlang);
+                if (ttsProvider === 'gemini') {
+                    // Throttle requests over the strict 3 RPM free tier TTS limit
+                    if (chunkIndex >= 3) {
+                        const extraWaitMs = (chunkIndex - 2) * 21000;
+                        await new Promise(resolve => setTimeout(resolve, extraWaitMs));
+                    }
+                    if (sessionId !== audioGenerationSessionId.current) return;
+                    audioData = await generateSpeech(textChunk, selectedVoice, selectedSlang);
+                } else {
+                    // Sarvam
+                    // Throttle rapid requests so we don't hit 429 when mass-buffering long chapters.
+                    if (chunkIndex >= 5) {
+                        const extraWaitMs = (chunkIndex - 4) * 1500; // 1.5 seconds pacing per sequential chunk
+                        await new Promise(resolve => setTimeout(resolve, extraWaitMs));
+                    }
+                    if (sessionId !== audioGenerationSessionId.current) return;
+                    audioData = await generateSarvamSpeech(textChunk, selectedVoice);
+                }
+                
                 // Save to local cache
                 await cacheService.saveAudioChunk(pdfKey, selectedChapter!.title, audioProfileKey, chunkIndex, audioData);
-                // Upload to cloud for cross-device access
-                if (user) {
-                    await firebaseService.uploadAndSaveAudioChunk(user.uid, pdfKey, audioKey, audioData);
-                }
             }
             
             if (sessionId === audioGenerationSessionId.current && audioData) {
@@ -381,35 +436,69 @@ const App: React.FC = () => {
         return;
     }
     
-    if (isTextExtractionComplete.current) {
-        if (processedTextLength.current < chapterText.length) {
-            const textChunk = sentences.join(' ');
-            if (textChunk.trim().length > 0) {
-                const chunkIndex = requestedChunkIndexCounter.current++;
-                processChunk(textChunk, chunkIndex);
+    // Process the Singleton queue sequentially to avoid 429 API blocks
+    const processQueue = async () => {
+        if (isGeneratingQueue.current) return;
+        isGeneratingQueue.current = true;
+        while (generationQueue.current.length > 0) {
+            const item = generationQueue.current[0];
+            if (item.sessionId !== audioGenerationSessionId.current) {
+                 generationQueue.current = [];
+                 break;
             }
-            processedTextLength.current = chapterText.length;
+            await processChunk(item.textChunk, item.chunkIndex);
+            generationQueue.current.shift(); // Remove after processing
         }
+        isGeneratingQueue.current = false;
+    };
+    
+    const getTargetChunkLength = () => {
+        if (ttsProvider === 'sarvam') return 450; // Sarvam has a very strict 500 char length limit.
+        if (requestedChunkIndexCounter.current === 0) return 300; // Fast first chunk (~2 sentences)
+        if (requestedChunkIndexCounter.current === 1) return 1500; // Medium second chunk (~10 sentences)
+        return 4000; // Maximize payload (~40 sentences) to save API limits
+    };
+
+    let processedTextInThisRun = "";
+
+    if (isTextExtractionComplete.current) {
+        let currentChunk = "";
+        for (const sentence of sentences) {
+            if (currentChunk.length + sentence.length > getTargetChunkLength() && currentChunk.trim().length > 0) {
+                const chunkIndex = requestedChunkIndexCounter.current++;
+                generationQueue.current.push({ textChunk: currentChunk.trim(), chunkIndex, sessionId: audioGenerationSessionId.current });
+                processedTextInThisRun += currentChunk;
+                currentChunk = "";
+            }
+            currentChunk += sentence;
+        }
+        if (currentChunk.trim().length > 0) {
+            const chunkIndex = requestedChunkIndexCounter.current++;
+            generationQueue.current.push({ textChunk: currentChunk.trim(), chunkIndex, sessionId: audioGenerationSessionId.current });
+            processedTextInThisRun += currentChunk;
+        }
+        processedTextLength.current += processedTextInThisRun.length;
         signalEndOfStream();
     } else {
-        if (sentences.length >= sentencesPerChunk) {
-            const numChunksToProcess = Math.floor(sentences.length / sentencesPerChunk);
-            const sentencesToProcess = sentences.slice(0, numChunksToProcess * sentencesPerChunk);
-            
-            let processedTextInThisRun = '';
-
-            for (let i = 0; i < numChunksToProcess; i++) {
-                const chunkSentences = sentencesToProcess.slice(i * sentencesPerChunk, (i + 1) * sentencesPerChunk);
-                const textChunk = chunkSentences.join(' ');
-                
-                processedTextInThisRun += chunkSentences.join('');
-
-                const chunkIndex = requestedChunkIndexCounter.current++;
-                processChunk(textChunk, chunkIndex);
-            }
-            processedTextLength.current += processedTextInThisRun.length;
+        let currentChunk = "";
+        let sentencesToProcess = sentences;
+        if (sentences.length > 0) {
+             sentencesToProcess = sentences.slice(0, -1);
         }
+        for (const sentence of sentencesToProcess) {
+            if (currentChunk.length + sentence.length > getTargetChunkLength() && currentChunk.trim().length > 0) {
+                const chunkIndex = requestedChunkIndexCounter.current++;
+                generationQueue.current.push({ textChunk: currentChunk.trim(), chunkIndex, sessionId: audioGenerationSessionId.current });
+                processedTextInThisRun += currentChunk;
+                currentChunk = "";
+            }
+            currentChunk += sentence;
+        }
+        processedTextLength.current += processedTextInThisRun.length;
     }
+    
+    // Trigger the background queue
+    processQueue();
   }, [isAudioRequested, chapterText, selectedChapter, selectedVoice, selectedSlang, pdfKey, user, handlePlaybackError]);
 
 
@@ -422,14 +511,19 @@ const App: React.FC = () => {
     handleStopAudio();
     setPlaybackError(null);
     
-    const cacheKey = selectedVoice + selectedSlang;
+    const cacheKey = `${ttsProvider}_${selectedVoice}_${selectedSlang}`;
     if (previewAudioCache[cacheKey]) {
       try { await playSimpleAudio(previewAudioCache[cacheKey]); }
       catch (e) { handlePlaybackError(e, 'play cached voice preview'); }
     } else {
       setIsPreviewingVoice(true);
       try {
-        const audioData = await generateSpeech(VOICE_PREVIEW_TEXT, selectedVoice, 'Standard');
+        let audioData;
+        if (ttsProvider === 'sarvam') {
+            audioData = await generateSarvamSpeech(VOICE_PREVIEW_TEXT, selectedVoice);
+        } else {
+            audioData = await generateSpeech(VOICE_PREVIEW_TEXT, selectedVoice, 'Standard');
+        }
         setPreviewAudioCache(prev => ({ ...prev, [cacheKey]: audioData }));
         await playSimpleAudio(audioData);
       } catch (e) {
@@ -441,7 +535,7 @@ const App: React.FC = () => {
   };
 
   const handleAddBookmark = async () => {
-    if (!user || !pdfKey || !selectedChapter || !isReading) return;
+    if (!pdfKey || !selectedChapter || !isReading) return;
     
     const state = getCurrentPlaybackState();
     if (!state) return;
@@ -459,7 +553,7 @@ const App: React.FC = () => {
     const newBookmarks = { ...bookmarks, [selectedChapter.title]: updatedChapterBookmarks };
     
     try {
-        await firebaseService.saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
+        await cacheService.saveBookmarks(pdfKey, newBookmarks);
         setBookmarks(newBookmarks);
     } catch(e) {
         console.error("Failed to save bookmark:", e);
@@ -469,13 +563,13 @@ const App: React.FC = () => {
   };
   
   const handleDeleteBookmark = async (bookmarkId: string) => {
-    if (!user || !pdfKey || !selectedChapter) return;
+    if (!pdfKey || !selectedChapter) return;
     
     const updatedChapterBookmarks = (bookmarks[selectedChapter.title] || []).filter(b => b.id !== bookmarkId);
     const newBookmarks = { ...bookmarks, [selectedChapter.title]: updatedChapterBookmarks };
 
     try {
-        await firebaseService.saveBookmarksForFile(user.uid, pdfKey, newBookmarks);
+        await cacheService.saveBookmarks(pdfKey, newBookmarks);
         setBookmarks(newBookmarks);
     } catch(e) {
         console.error("Failed to delete bookmark:", e);
@@ -601,13 +695,19 @@ const App: React.FC = () => {
                         <div className="flex-1">
                             <label htmlFor="voice-select" className="sr-only">Voice</label>
                             <select id="voice-select" value={selectedVoice} onChange={e => setSelectedVoice(e.target.value)} disabled={isReading || isGeneratingAudio} className="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 w-full disabled:opacity-70 disabled:cursor-not-allowed">
-                                {AVAILABLE_VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                                {ttsProvider === 'sarvam' 
+                                  ? SARVAM_VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)
+                                  : AVAILABLE_VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)
+                                }
                             </select>
                         </div>
                          <div className="flex-1">
                             <label htmlFor="slang-select" className="sr-only">Style</label>
-                            <select id="slang-select" value={selectedSlang} onChange={e => setSelectedSlang(e.target.value)} disabled={isReading || isGeneratingAudio} className="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 w-full disabled:opacity-70 disabled:cursor-not-allowed">
-                                {NARRATION_STYLES.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            <select id="slang-select" value={selectedSlang} onChange={e => setSelectedSlang(e.target.value)} disabled={isReading || isGeneratingAudio || ttsProvider === 'sarvam'} className="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 w-full disabled:opacity-70 disabled:cursor-not-allowed">
+                                {ttsProvider === 'sarvam' 
+                                  ? <option value="Standard">N/A (Sarvam AI)</option>
+                                  : NARRATION_STYLES.map(s => <option key={s.id} value={s.id}>{s.name}</option>)
+                                }
                             </select>
                         </div>
                         <button onClick={handlePreviewVoice} disabled={isPreviewingVoice || isReading || isGeneratingAudio || isTextExtracting} className="p-2 bg-gray-700 rounded-md hover:bg-gray-600 disabled:opacity-50">
@@ -702,10 +802,14 @@ const App: React.FC = () => {
                         )}
                     </>
                 )}
+                <button onClick={() => setIsSettingsModalOpen(true)} className="p-2 text-gray-400 hover:text-white transition-colors" aria-label="Settings">
+                    <CogIcon className="w-6 h-6" />
+                </button>
             </div>
         </header>
         {renderContent()}
         {isAuthModalOpen && <AuthModal onClose={() => setIsAuthModalOpen(false)} />}
+        <SettingsModal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} onSave={handleSettingsSave} />
     </div>
   );
 };

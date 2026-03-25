@@ -6,6 +6,13 @@ export const AVAILABLE_VOICES = [
     { id: 'Fenrir', name: 'Fenrir (M)' },
 ];
 
+export const SARVAM_VOICES = [
+    { id: 'amelia', name: 'Amelia (F) - en-IN' },
+    { id: 'shubh', name: 'Shubh (M) - en-IN' },
+    { id: 'priya', name: 'Priya (F) - hi-IN' },
+    { id: 'amit', name: 'Amit (M) - hi-IN' }
+];
+
 export const NARRATION_STYLES = [
     { id: 'Standard', name: 'Standard' },
     { id: 'a Gen Z', name: 'Gen Z' },
