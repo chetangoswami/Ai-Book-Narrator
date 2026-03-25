@@ -1,43 +1,91 @@
-# AI Book Narrator
+<div align="center">
+  
+# 🎧 AI Book Narrator
 
-A highly advanced, strictly offline-first Book Narrator web application. It securely uses **IndexedDB** for persistent offline storage and relies on **Google Gemini** for intelligent structural text extraction, rendering chapters natively into high-quality spoken audio using **Sarvam AI** and **Google Cloud TTS**.
+An incredibly smart, lightning-fast, and completely private **offline-first** web application that reads your PDF books to you dynamically using state-of-the-art Generative AI and advanced Text-to-Speech engines.
+  
+</div>
 
-## 🚀 Features
+---
 
-- **Offline-First Library (`IndexedDB v2`):** Your uploaded books, intelligently extracted text chapters, and rendered audio chunks are cached persistently entirely inside your browser's internal local database. You can refresh, disconnect from the internet, and still listen to your previously processed books without external cloud storage limits!
-- **Intelligent Table of Contents:** Upload massive PDF textbooks, and the Gemini AI will automatically dissect and structure the entire book into individual, perfectly sequenced chapters.
-- **Multi-Provider TTS Engine:** Swap dynamically between official Gemini Cloud Voices or the state-of-the-art **Sarvam AI (`bulbul:v3`)** for seamless, natively-accented Indic and English storytelling.
-- **Asynchronous Safe Queuing:** Stream the audio instantly! While you're listening to the very first chunk of a chapter, the background singleton queue is silently pre-fetching Chunks 1, 2, and 3 completely asynchronously. This mathematically bypasses `429 Rate Limit` bottlenecks and browser traffic freezes.
-- **Bring Your Own Keys (BYOK):** Securely manage your own Google Gemini API Key and Sarvam API Key completely inside your browser's Sandboxed `localStorage` without any external middleman databases or third-party tracking.
+## 📖 How Does It Work?
 
-## ⚙️ Quick Start Setup
+Instead of relying on clunky, slow cloud servers to store your private documents, **AI Book Narrator** runs directly in your browser! It uses the power of your own local computer (via IndexedDB) combined with Google Gemini and Sarvam AI to create a completely private listening experience.
 
-### 1. Requirements
-- Node.js installed globally (`v18+`)
-- A **Gemini Developer API Key** (Get yours free from Google AI Studio)
-- A **Sarvam API Key** (Optional, highly recommended for natural Indian accents)
+```mermaid
+graph TD
+    A[Launch Web App] --> B[Enter API Keys in Settings];
+    B --> C[Upload Any PDF Book];
+    
+    subgraph "Google Gemini & Extraction"
+    C --> D{Gemini Flash AI};
+    D --> E[Extracts Chapter Text];
+    D --> F[Generates Table of Contents];
+    end
+    
+    F --> G[Click a Chapter to Play!];
+    E --> G;
+    
+    subgraph "Sarvam AI Audio Generation"
+    G --> H[Convert Text to Speech];
+    H --> I[Queue Audio Chunks Seamlessly];
+    end
+    
+    I --> J[Audio Plays Instantly! 🎵];
+    
+    subgraph "Persistent Offline Storage"
+    J --> K[(Saved to Local Browser!)];
+    end
+```
 
-### 2. Installation
-Clone this repository and install all node modules to spin up the required dependencies.
+---
 
+## 🛠️ Step-by-Step Usage Guide
+
+We designed this app to be incredibly easy to use. Follow these simple steps:
+
+### 1. Configure the AI Brain (One-Time Setup)
+Since this app is totally free and open-source, you just need to plug in your own free AI keys!
+1. Click the **Gear Icon (Settings)** in the top right corner of the app.
+2. Get your free **Google Gemini Key** from [Google AI Studio](https://aistudio.google.com/). Paste it in.
+3. Get your free **Sarvam AI Key** from [Sarvam Platform](https://www.sarvam.ai/). Paste it in.
+4. Click **Connect Engine**. 
+*(Don't worry, your keys are NEVER sent to us. They are saved entirely locally on your computer's browser).*
+
+### 2. Upload Your First Book
+1. Click the massive **Choose PDF** button in the middle of the screen.
+2. Select any local PDF file (like a textbook, novel, or research paper).
+3. Wait 5 to 60 seconds (depending on book length) while Gemini violently rips through the pages to meticulously build you a beautiful, clickable Table of Contents.
+
+### 3. Sit Back and Listen
+1. You will see a list of individual Chapters appear in the navigation menu.
+2. **Click on any Chapter.**
+3. The app will instantaneously start speaking to you! 
+4. **Behind the scenes:** While you listen to the first 10 seconds of speech, our robust Async Queue system works silently in the background fetching the next 50 seconds to ensure you *never* hit a loading screen or a Rate Limit.
+
+### 4. Close Your Browser (It's Offline!)
+Next time you open the website, you don't need to re-upload the same book! The massive PDF document, the extracted text, and the generated audio chunks have been cryptographically cached into your browser's local hard drive via `IndexedDB`. 
+
+---
+
+## 💻 Tech Stack & Developer Setup
+
+If you want to run this application locally on your own computer instead of using the live link:
+
+1. Copy the codebase:
 ```bash
 git clone https://github.com/chetangoswami/Ai-Book-Narrator.git
 cd Ai-Book-Narrator
+```
+
+2. Install modules:
+```bash
 npm install
 ```
 
-### 3. Running Locally
-Start the powerful Vite development server:
+3. Spin up the Vite Dev Server:
 ```bash
 npm run dev
 ```
 
-### 4. Configuration
-When you launch the web app, simply click the **Settings (Gear Icon)** in the top right corner. Input your respective API keys. They will be saved permanently to your browser, and you are officially ready to upload your first book!
-
-## 🔧 Architecture & Deployment
-This application represents a shift away from traditional rigid Backend-As-A-Service providers (like Firebase Cloud Storage restrictions) in favor of the localized `IndexedDB` Web API. Once the generative TTS components stream in, the asset is permanently converted into an offline playback node.
-
-The application uses standard `React`, styled seamlessly with `TailwindCSS`, and interacts natively with the `AudioContext` layer to securely decode raw binary WAV and PCM chunks directly onto the hardware without lag.
-
-Built for deployment on Firebase Hosting via `firebase deploy`.
+Built entirely with React, TypeScript, TailwindCSS, Native Web Audio APIs, and Firebase Hosting.
